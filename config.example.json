@@ -1,0 +1,26 @@
+﻿{
+    "backupMysql": {
+        "host": "",
+        "port": "",
+        "user": "",
+        "password": "",
+        "database": ""
+    },
+    "importMysql": {
+        "host": "",
+        "port": "",
+        "user": "",
+        "password": "",
+        "database": ""
+    },
+    "paths": {
+        "baseTargetPath": ".",
+        "schemaOutputPath": ".",
+        "dataBackupPath": "data",
+        "imageBackupPath": "vtImages_2D/images",
+        "schemaBackupPath": "."
+    },
+    "saveImgPath": {
+        "module_name": "D:\\path\\to\\images"
+    }
+}

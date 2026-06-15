@@ -1,0 +1,26 @@
+﻿{
+  "backupMysql": {
+    "host": "127.0.0.1",
+    "port": "3306",
+    "user": "root",
+    "password": "123456",
+    "database": "host5"
+  },
+  "importMysql": {
+    "host": "",
+    "port": "",
+    "user": "",
+    "password": "",
+    "database": ""
+  },
+  "paths": {
+    "baseTargetPath": ".",
+    "schemaOutputPath": ".",
+    "dataBackupPath": "data",
+    "imageBackupPath": "vtImages_2D/images",
+    "schemaBackupPath": "."
+  },
+  "saveImgPath": {
+    "Host主机模块": "E:\\vtImages_2D"
+  }
+}

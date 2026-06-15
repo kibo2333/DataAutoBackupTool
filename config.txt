@@ -1,0 +1,9 @@
+﻿BackupRoot=
+BackupTime=11:56
+BackupContent=仅数据
+DeleteAfterBackup=暂不删除
+AutoBackup=False
+ImportPath=
+ImportContent=图片+数据
+DuplicateOption=追加导入
+AfterImport=保留备份文件
