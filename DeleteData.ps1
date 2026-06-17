@@ -1,30 +1,6 @@
 ﻿param([Parameter(Position=0)][string]$guid)
 
-[System.Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-[System.Console]::InputEncoding = [System.Text.Encoding]::UTF8
-$PSDefaultParameterValues['*:Encoding'] = 'UTF8'
-
-function Write-Log { param([string]$message); [Console]::WriteLine($message) }
-
-# 查找 MySQL 可执行文件路径
-function Find-MySqlBin {
-    $cmd = Get-Command "mysql.exe" -ErrorAction SilentlyContinue
-    if ($cmd) { return Split-Path $cmd.Source }
-    $services = Get-ChildItem "HKLM:\SYSTEM\CurrentControlSet\Services" -ErrorAction SilentlyContinue |
-        Where-Object { $_.PSChildName -match "^MySQL" }
-    foreach ($svc in $services) {
-        $imgPath = (Get-ItemProperty $svc.PSPath -ErrorAction SilentlyContinue).ImagePath
-        if ($imgPath) {
-            $binDir = Split-Path ($imgPath -replace '"','').Trim()
-            if ($binDir -and (Test-Path (Join-Path $binDir "mysql.exe"))) { return $binDir }
-        }
-    }
-    $fixedPaths = @("E:\MySQL\MySQL Server 8.0\bin", "D:\MySQL\MySQL Server 8.0\bin")
-    foreach ($path in $fixedPaths) {
-        if (Test-Path (Join-Path $path "mysql.exe")) { return $path }
-    }
-    return $null
-}
+. "$PSScriptRoot\_common.ps1"
 
 $mysqlBinDir = Find-MySqlBin
 if ($mysqlBinDir) { $env:PATH = "$mysqlBinDir;$env:PATH" }
@@ -50,6 +26,9 @@ $mysqlDatabase = $config.backupMysql.database
 
 Write-Log "Config: host=$mysqlHost, port=$mysqlport, database=$mysqlDatabase"
 
+# 定义全局 mysql.exe 路径，供所有函数使用
+$mysqlExeGlobal = if ($mysqlBinDir) { "$mysqlBinDir\mysql.exe" } else { "mysql.exe" }
+
 Write-Log "=============================="
 Write-Log "Delete Data Script v1.0"
 Write-Log "=============================="
@@ -59,8 +38,7 @@ Write-Log "GUID: $cleanGuid"
 function Get-DetectionsSHA256 {
     param([string]$guid)
     $query = "SELECT detectionsSHA256 FROM rep_lot WHERE GUID = '$guid';"
-    $mysqlExe = if ($mysqlBinDir) { "$mysqlBinDir\mysql.exe" } else { "mysql.exe" }
-    $result = & $mysqlExe "-h$mysqlHost" "-P$mysqlport" "-u$mysqlUser" "-p$mysqlPassword" "-D$mysqlDatabase" "--default-character-set=utf8mb4" -N -e $query 2>&1
+    $result = & $mysqlExeGlobal "-h$mysqlHost" "-P$mysqlport" "-u$mysqlUser" "-p$mysqlPassword" "-D$mysqlDatabase" "--default-character-set=utf8mb4" -N -e $query 2>&1
     if ($LASTEXITCODE -ne 0) { return $null }
     $result = $result | Where-Object { $_ -notlike "*Using a password*" }
     if ($result -is [array]) { $result = $result[0] }
@@ -73,7 +51,7 @@ function Delete-TableData {
     param([string]$tableName, [string]$whereClause, [string]$description)
     Write-Log "Deleting $tableName ()..."
     $query = "DELETE FROM $tableName WHERE $whereClause; SELECT ROW_COUNT();"
-    $output = & $mysqlExe "-h$mysqlHost" "-P$mysqlport" "-u$mysqlUser" "-p$mysqlPassword" "-D$mysqlDatabase" "--default-character-set=utf8mb4" -N -e $query 2>&1
+    $output = & $mysqlExeGlobal "-h$mysqlHost" "-P$mysqlport" "-u$mysqlUser" "-p$mysqlPassword" "-D$mysqlDatabase" "--default-character-set=utf8mb4" -N -e $query 2>&1
     if ($LASTEXITCODE -eq 0) {
         $output = $output | Where-Object { $_ -notlike "*Using a password*" }
         if ($output -is [array] -and $output.Length -gt 0) { $affectedRows = $output[-1] }

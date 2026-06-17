@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Drawing;
 using System.Windows.Forms;
 using System.IO;
@@ -7,8 +7,11 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Text;
 
+using Newtonsoft.Json.Linq;
+
 public class DataBackupTool : Form
 {
+    private static string configRoot = null;
     private TabControl 备份记录;
     private TabPage tabPage3;
     private TabPage tabPage4;
@@ -980,10 +983,16 @@ public class DataBackupTool : Form
                         string newContent = reader.ReadToEnd();
                         if (!string.IsNullOrEmpty(newContent))
                         {
-                            this.Invoke((MethodInvoker)delegate {
-                                textBox2.AppendText(newContent);
-                                textBox2.ScrollToCaret();
-                            });
+                            if (this.IsHandleCreated && !this.IsDisposed)
+                            {
+                                this.Invoke((MethodInvoker)delegate {
+                                    if (!this.IsDisposed && textBox2.IsHandleCreated)
+                                    {
+                                        textBox2.AppendText(newContent);
+                                        textBox2.ScrollToCaret();
+                                    }
+                                });
+                            }
                         }
                     }
                 }
@@ -1168,32 +1177,74 @@ public class DataBackupTool : Form
         textBox1.Enabled = false;
         comboBox1.Enabled = false;
         
-        if (action == "立即备份")
+        try
         {
-            UpdateStatus("正在备份...", Color.Blue);
-            Log("开始立即备份，GUID: " + guid + "，备份内容: " + GetSelectedBackupContent() + "，备份后删除: " + GetSelectedDeleteOption());
-            
-            ThreadPool.QueueUserWorkItem((state) =>
+            if (action == "立即备份")
             {
-                ExecuteBackup(guid);
-            });
+                UpdateStatus("正在备份...", Color.Blue);
+                Log("开始立即备份，GUID: " + guid + "，备份内容: " + GetSelectedBackupContent() + "，备份后删除: " + GetSelectedDeleteOption());
+                
+                ThreadPool.QueueUserWorkItem((state) =>
+                {
+                    ExecuteBackup(guid);
+                });
+            }
+            else if (action == "立即导入")
+            {
+                UpdateStatus("正在导入...", Color.Blue);
+                Log("开始立即导入，GUID: " + guid);
+                
+                ThreadPool.QueueUserWorkItem((state) =>
+                {
+                    ExecuteImport(guid);
+                });
+            }
+            else
+            {
+                isWorking = false;
+                ResetUI();
+                MessageBox.Show("未知操作类型: " + action);
+            }
         }
-        else
+        catch (Exception ex)
         {
-            UpdateStatus("正在导入...", Color.Blue);
-            Log("开始立即导入，GUID: " + guid);
-            
-            ThreadPool.QueueUserWorkItem((state) =>
-            {
-                ExecuteImport(guid);
-            });
+            isWorking = false;
+            ResetUI();
+            Log("启动操作失败: " + ex.Message);
+            MessageBox.Show("启动操作失败: " + ex.Message);
         }
     }
     
     private void Button2_Click(object sender, EventArgs e)
     {
-        // 无论是否正在工作，都尝试终止所有相关进程
-        DialogResult result = MessageBox.Show("确定要强制取消所有备份操作吗？", "确认中断", MessageBoxButtons.OKCancel);
+        if (isWorking)
+        {
+            CancelAllBackups(false);
+        }
+        else
+        {
+            Log("当前没有正在执行的操作");
+        }
+    }
+    
+    private void CancelAllBackups(bool deleteScheduledTask)
+    {
+        string message;
+        string title;
+        MessageBoxIcon icon = MessageBoxIcon.None;
+        if (deleteScheduledTask)
+        {
+            message = "确定要强制取消所有备份操作吗？\n\n这将终止所有正在运行的备份进程（包括定时任务启动的自动备份），并禁用自动备份计划。";
+            title = "确认撤销备份";
+            icon = MessageBoxIcon.Warning;
+        }
+        else
+        {
+            message = "确定要强制取消所有备份操作吗？";
+            title = "确认中断";
+        }
+        
+        DialogResult result = MessageBox.Show(message, title, MessageBoxButtons.OKCancel, icon);
         if (result == DialogResult.OK)
         {
             isWorking = false;
@@ -1233,6 +1284,11 @@ public class DataBackupTool : Form
             // 终止所有相关的备份进程
             TerminateAllBackupProcesses();
             
+            if (deleteScheduledTask)
+            {
+                DeleteScheduledTask("DataBackupTool_AutoBackup");
+            }
+            
             // 释放互斥锁
             if (backupMutex != null)
             {
@@ -1245,9 +1301,24 @@ public class DataBackupTool : Form
                 backupMutex = null;
             }
             
-            UpdateStatus("操作已中断", Color.Red);
-            Log("操作已被用户中断");
+            if (deleteScheduledTask)
+            {
+                checkBox1.Checked = false;
+                UpdateStatus("备份已撤销", Color.Red);
+                Log("备份操作已被用户撤销，计划任务已删除");
+            }
+            else
+            {
+                UpdateStatus("操作已中断", Color.Red);
+                Log("操作已被用户中断");
+            }
+            
             ResetUI();
+            
+            if (deleteScheduledTask)
+            {
+                MessageBox.Show("所有备份操作已取消，自动备份计划已停用！", "撤销成功", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
         }
     }
     
@@ -1290,30 +1361,6 @@ public class DataBackupTool : Form
                 childProcessPids.Clear();
             }
             
-            // ===== 按名称终止本程序关联的 PowerShell 进程（覆盖跨进程场景）=====
-            string exeDir = Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location);
-            foreach (var process in System.Diagnostics.Process.GetProcessesByName("powershell"))
-            {
-                try
-                {
-                    // 通过命令行参数判断是否为本程序启动的 PowerShell 进程
-                    if (process.StartInfo != null && !string.IsNullOrEmpty(process.StartInfo.Arguments))
-                    {
-                        if (process.StartInfo.Arguments.Contains("AutoBackup") ||
-                            process.StartInfo.Arguments.Contains("GUID-Data") ||
-                            process.StartInfo.Arguments.Contains("imagecopy") ||
-                            process.StartInfo.Arguments.Contains("schema.ps1") ||
-                            process.StartInfo.Arguments.Contains("DeleteData") ||
-                            process.StartInfo.Arguments.Contains("ImportWorker"))
-                        {
-                            process.Kill();
-                            Log(String.Format("终止关联 PowerShell 进程: {0}", process.Id));
-                        }
-                    }
-                }
-                catch { }
-            }
-            
             // ===== 终止 PowerShell 间接启动的 robocopy 子进程 =====
             foreach (var process in System.Diagnostics.Process.GetProcessesByName("robocopy"))
             {
@@ -1335,6 +1382,20 @@ public class DataBackupTool : Form
                 {
                     process.Kill();
                     Log(String.Format("终止 mysqldump 进程: {0}", process.Id));
+                }
+                catch (Exception ex)
+                {
+                    Log(String.Format("终止进程 {0} 失败: {1}", process.Id, ex.Message));
+                }
+            }
+            
+            // ===== 终止 PowerShell 间接启动的 mysql 子进程 =====
+            foreach (var process in System.Diagnostics.Process.GetProcessesByName("mysql"))
+            {
+                try
+                {
+                    process.Kill();
+                    Log(String.Format("终止 mysql 进程: {0}", process.Id));
                 }
                 catch (Exception ex)
                 {
@@ -1445,69 +1506,13 @@ public class DataBackupTool : Form
     // 撤销备份按钮点击事件
     private void ButtonCancelBackup_Click(object sender, EventArgs e)
     {
-        DialogResult result = MessageBox.Show("确定要强制取消所有备份操作吗？\n\n这将终止所有正在运行的备份进程（包括定时任务启动的自动备份），并禁用自动备份计划。", "确认撤销备份", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning);
-        if (result == DialogResult.OK)
+        if (isWorking)
         {
-            isWorking = false;
-            
-            // 发送跨进程取消信号
-            if (cancelEventHandle != null)
-            {
-                try { cancelEventHandle.Set(); } catch { }
-            }
-            
-            // 终止主进程
-            System.Diagnostics.Process procToKill;
-            lock (stateLock)
-            {
-                procToKill = currentProcess;
-            }
-            if (procToKill != null && !procToKill.HasExited)
-            {
-                try
-                {
-                    procToKill.Kill();
-                    Log("主进程已被终止");
-                }
-                catch (Exception ex)
-                {
-                    Log("终止主进程时发生错误: " + ex.Message);
-                }
-                finally
-                {
-                    lock (stateLock)
-                    {
-                        currentProcess = null;
-                    }
-                }
-            }
-            
-            // 终止所有相关的备份进程
-            TerminateAllBackupProcesses();
-            
-            // 删除计划任务，防止下次自动执行
-            DeleteScheduledTask("DataBackupTool_AutoBackup");
-            
-            // 释放互斥锁
-            if (backupMutex != null)
-            {
-                try
-                {
-                    backupMutex.ReleaseMutex();
-                    Log("互斥锁已释放");
-                }
-                catch { }
-                backupMutex = null;
-            }
-            
-            // 更新UI：取消自动备份勾选
-            checkBox1.Checked = false;
-            
-            UpdateStatus("备份已撤销", Color.Red);
-            Log("备份操作已被用户撤销，计划任务已删除");
-            ResetUI();
-            
-            MessageBox.Show("所有备份操作已取消，自动备份计划已停用！", "撤销成功", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            CancelAllBackups(true);
+        }
+        else
+        {
+            Log("当前没有正在执行的备份操作");
         }
     }
     
@@ -1526,20 +1531,10 @@ public class DataBackupTool : Form
     // 一键导入标签页的保存配置按钮点击事件
     private void ButtonSaveImportConfig_Click(object sender, EventArgs e)
     {
-        // 保存导入相关配置到 config.txt
+        // 保存导入相关配置到 config.json
         try
         {
-            string configContent = "BackupRoot=" + textBox3.Text + Environment.NewLine +
-                                  "BackupTime=" + dateTimePicker1.Value.ToShortTimeString() + Environment.NewLine +
-                                  "BackupContent=" + GetSelectedBackupContent() + Environment.NewLine +
-                                  "DeleteAfterBackup=" + GetSelectedDeleteOption() + Environment.NewLine +
-                                  "AutoBackup=" + checkBox1.Checked.ToString() + Environment.NewLine +
-                                  "ImportPath=" + textBox4.Text + Environment.NewLine +
-                                  "ImportContent=" + GetSelectedImportContent() + Environment.NewLine +
-                                  "DuplicateOption=" + GetSelectedDuplicateOption() + Environment.NewLine +
-                                  "AfterImport=" + GetSelectedAfterImport();
-            string configPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "config.txt");
-            File.WriteAllText(configPath, configContent, Encoding.UTF8);
+            SaveConfig();
             
             Log("导入配置已保存");
             MessageBox.Show("导入配置保存成功");
@@ -1598,7 +1593,7 @@ public class DataBackupTool : Form
             string deleteOption = GetSelectedDeleteOption();
             
             // 从配置文件读取备份路径
-            string basePath = AppDomain.CurrentDomain.BaseDirectory;
+            string basePath = configRoot;
             string dataBackupPath = Path.Combine(basePath, GetConfigValue("paths.dataBackupPath", "data"));
             string imageBackupPath = Path.Combine(basePath, GetConfigValue("paths.imageBackupPath", "vtImages_2D/images"));
             string schemaBackupPath = Path.Combine(basePath, GetConfigValue("paths.schemaBackupPath", "."));
@@ -1611,7 +1606,7 @@ public class DataBackupTool : Form
             
             if (backupImage)
             {
-                string imageScript = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "imagecopy.ps1");
+                string imageScript = Path.Combine(configRoot, "imagecopy.ps1");
                 string scriptError = "";
                 int exitCode = RunPowerShellScript(imageScript, "-guid \"" + guid + "\"", out scriptError, imageBackupPath);
                 if(exitCode != 0)
@@ -1662,7 +1657,7 @@ public class DataBackupTool : Form
             
             if (backupData)
             {
-                string dataScript = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "GUID-Data.ps1");
+                string dataScript = Path.Combine(configRoot, "GUID-Data.ps1");
                 string psError;
                 int dataExitCode = RunPowerShellScript(dataScript, "-guid \"" + guid + "\"", out psError, dataBackupPath);
                 if (dataExitCode != 0)
@@ -1670,7 +1665,7 @@ public class DataBackupTool : Form
                     throw new Exception("数据导出失败，退出代码: " + dataExitCode + "，错误信息: " + (psError ?? "未知错误"));
                 }
                 
-                string schemaScript = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "schema.ps1");
+                string schemaScript = Path.Combine(configRoot, "schema.ps1");
                 int schemaExitCode = RunPowerShellScript(schemaScript, "-guid \"" + guid + "\"", out psError, schemaBackupPath);
                 if (schemaExitCode != 0)
                 {
@@ -1729,9 +1724,9 @@ public class DataBackupTool : Form
             
             if (importData)
             {
-                string importScript = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ImportWorker.ps1");
+                string importScript = Path.Combine(configRoot, "ImportWorker.ps1");
                 // 获取导入路径，若为空则使用程序运行目录
-                string importPath = (string.IsNullOrEmpty(textBox4.Text.Trim()) ? AppDomain.CurrentDomain.BaseDirectory : textBox4.Text).TrimEnd('\\');
+                string importPath = (string.IsNullOrEmpty(textBox4.Text.Trim()) ? configRoot : textBox4.Text).TrimEnd('\\');
                 if (!Directory.Exists(importPath))
                 {
                     throw new Exception("导入源目录不存在: " + importPath);
@@ -1754,7 +1749,7 @@ public class DataBackupTool : Form
             if (afterImport == "删除备份文件")
             {
                 // 获取基础路径，若为空则使用程序运行目录
-                string basePath = string.IsNullOrEmpty(textBox4.Text.Trim()) ? AppDomain.CurrentDomain.BaseDirectory : textBox4.Text;
+                string basePath = string.IsNullOrEmpty(textBox4.Text.Trim()) ? configRoot : textBox4.Text;
                 
                 string dataPath = Path.Combine(basePath, "data", guid);
                 string imagePath = Path.Combine(basePath, "vtImages_2D", "images", guid);
@@ -1838,7 +1833,7 @@ public class DataBackupTool : Form
             
             if (importData)
             {
-                string importScript = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ImportWorker.ps1");
+                string importScript = Path.Combine(configRoot, "ImportWorker.ps1");
                 if (!Directory.Exists(importPath))
                 {
                     throw new Exception("导入源目录不存在: " + importPath);
@@ -1848,12 +1843,27 @@ public class DataBackupTool : Form
                 {
                     throw new Exception("导入源目录下缺少 data 文件夹: " + dataDir);
                 }
-                string args = "-path \"" + importPath.TrimEnd('\\') + "\" -duplicateOption \"" + duplicateOption + "\"";
-                string psError;
-                int exitCode = RunPowerShellScript(importScript, args, out psError, "");
-                if (exitCode != 0)
+                string[] guidDirs = Directory.GetDirectories(dataDir);
+                if (guidDirs.Length == 0)
                 {
-                    throw new Exception("一键导入脚本执行失败，退出代码: " + exitCode + "，错误信息: " + (psError ?? "未知错误"));
+                    throw new Exception("data 目录下没有找到任何 GUID 子目录");
+                }
+                foreach (string guidDir in guidDirs)
+                {
+                    string guid = Path.GetFileName(guidDir);
+                    string args = string.Format("-guid \"{0}\" -path \"{1}\" -duplicateOption \"{2}\"", guid, importPath.TrimEnd('\\'), duplicateOption);
+                    string psError;
+                    int exitCode = RunPowerShellScript(importScript, args, out psError, "");
+                    if (exitCode != 0)
+                    {
+                        string errorMsg = string.Format("导入失败 (GUID: {0})，退出代码: {1}，错误信息: {2}", guid, exitCode, psError ?? "未知错误");
+                        Log(errorMsg);
+                        SaveOperationRecord(guid, "导入", "失败", importPath, "", errorMsg, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
+                    }
+                    else
+                    {
+                        SaveOperationRecord(guid, "导入", "成功", importPath, "", "单GUID导入完成", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
+                    }
                 }
             }
             
@@ -1903,7 +1913,7 @@ public class DataBackupTool : Form
             if (deleteOption == "删除数据")
             {
                 Log("执行备份后删除操作: " + deleteOption);
-                string deleteScript = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "DeleteData.ps1");
+                string deleteScript = Path.Combine(configRoot, "DeleteData.ps1");
                 string psError;
                 int exitCode = RunPowerShellScript(deleteScript, "\"" + guid + "\"", out psError);
                 if (exitCode != 0)
@@ -1962,16 +1972,26 @@ public class DataBackupTool : Form
             psi.StandardErrorEncoding = System.Text.Encoding.UTF8;
             
             System.Diagnostics.Process localProcess = Process.Start(psi);
-            lock (stateLock)
-            {
-                currentProcess = localProcess;
-            }
-            
             if (localProcess == null)
             {
                 Log("无法启动进程");
                 return -3;
             }
+            
+            lock (stateLock)
+            {
+                currentProcess = localProcess;
+            }
+            
+            // 异步读取避免死锁（子进程输出量大时同步 ReadToEnd 会阻塞）
+            System.Text.StringBuilder outputBuilder = new System.Text.StringBuilder();
+            System.Text.StringBuilder errorBuilder = new System.Text.StringBuilder();
+            object outputLock = new object();
+            object errorLock = new object();
+            localProcess.OutputDataReceived += (s, e) => { if (e.Data != null) { lock (outputLock) { outputBuilder.AppendLine(e.Data); } } };
+            localProcess.ErrorDataReceived += (s, e) => { if (e.Data != null) { lock (errorLock) { errorBuilder.AppendLine(e.Data); } } };
+            localProcess.BeginOutputReadLine();
+            localProcess.BeginErrorReadLine();
             
             // 记录子进程 PID，用于精确终止
             lock (pidLock)
@@ -1979,9 +1999,17 @@ public class DataBackupTool : Form
                 childProcessPids.Add(localProcess.Id);
             }
             
-            string output = localProcess.StandardOutput.ReadToEnd();
-            string error = localProcess.StandardError.ReadToEnd();
-            localProcess.WaitForExit();
+            // 等待进程退出（超时30分钟防止无限挂起）
+            if (!localProcess.WaitForExit(1800000))
+            {
+                Log("脚本执行超时，强制终止进程");
+                localProcess.Kill();
+                localProcess.WaitForExit(5000);
+            }
+            
+            // 使用异步收集的输出（BeginOutputReadLine 已消费流数据，不能再 ReadToEnd）
+            string output = outputBuilder.ToString().TrimEnd();
+            string error = errorBuilder.ToString().TrimEnd();
             
             if (!string.IsNullOrEmpty(output))
                 Log(output);
@@ -1999,6 +2027,8 @@ public class DataBackupTool : Form
                 }
             }
             int exitCode = localProcess.ExitCode;
+            int closedPid = localProcess.Id;
+            localProcess.Dispose();
             // 如果用户已取消，覆盖退出码为"已取消"，避免误报其他错误
             if (!isWorking)
             {
@@ -2006,7 +2036,7 @@ public class DataBackupTool : Form
             }
             lock (pidLock)
             {
-                childProcessPids.Remove(localProcess.Id);
+                childProcessPids.Remove(closedPid);
             }
             lock (stateLock)
             {
@@ -2055,7 +2085,7 @@ public class DataBackupTool : Form
                 return;
             }
             
-            string[] lines = File.ReadAllLines(recordFile);
+            string[] lines = File.ReadAllLines(recordFile, Encoding.UTF8);
             
             foreach (string line in lines)
             {
@@ -2174,30 +2204,51 @@ public class DataBackupTool : Form
         {
             try
             {
-                string configContent = "BackupRoot=" + textBox3.Text + Environment.NewLine +
-                                      "BackupTime=" + dateTimePicker1.Value.ToShortTimeString() + Environment.NewLine +
-                                      "BackupContent=" + GetSelectedBackupContent() + Environment.NewLine +
-                                      "DeleteAfterBackup=" + GetSelectedDeleteOption() + Environment.NewLine +
-                                      "AutoBackup=" + checkBox1.Checked.ToString() + Environment.NewLine +
-                                      "ImportPath=" + textBox4.Text + Environment.NewLine +
-                                      "ImportContent=" + GetSelectedImportContent() + Environment.NewLine +
-                                      "DuplicateOption=" + GetSelectedDuplicateOption() + Environment.NewLine +
-                                      "AfterImport=" + GetSelectedAfterImport();
-                string configPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "config.txt");
-                File.WriteAllText(configPath, configContent, Encoding.UTF8);
+                string jsonPath = Path.Combine(configRoot, "config.json");
+                Newtonsoft.Json.Linq.JObject config;
+                if (File.Exists(jsonPath))
+                {
+                    config = Newtonsoft.Json.Linq.JObject.Parse(File.ReadAllText(jsonPath));
+                }
+                else
+                {
+                    config = new Newtonsoft.Json.Linq.JObject();
+                }
                 
-                // 只有启用自动备份时才管理计划任务
-                // 未启用时：完全不碰计划任务（用户只是保存手动备份配置）
-                // 已启用时：先删除旧任务（确保参数更新），再创建新任务
+                Newtonsoft.Json.Linq.JObject ui = config["ui"] as Newtonsoft.Json.Linq.JObject;
+                if (ui == null)
+                {
+                    ui = new Newtonsoft.Json.Linq.JObject();
+                    config["ui"] = ui;
+                }
+                
+                ui["backupRoot"] = textBox3.Text;
+                ui["backupTime"] = dateTimePicker1.Value.ToShortTimeString();
+                ui["backupContent"] = GetSelectedBackupContent();
+                ui["deleteAfterBackup"] = GetSelectedDeleteOption();
+                ui["autoBackup"] = checkBox1.Checked;
+                ui["importPath"] = textBox4.Text;
+                ui["importContent"] = GetSelectedImportContent();
+                ui["duplicateOption"] = GetSelectedDuplicateOption();
+                ui["afterImport"] = GetSelectedAfterImport();
+                
+                File.WriteAllText(jsonPath, config.ToString(Newtonsoft.Json.Formatting.Indented), Encoding.UTF8);
+                
+                string backupTime = dateTimePicker1.Value.ToString("HH:mm:ss");
+                // 管理计划任务
                 if (checkBox1.Checked)
                 {
-                    string backupTime = dateTimePicker1.Value.ToString("HH:mm:ss");
-                    // 先删除旧的计划任务，确保只有一个任务存在
+                    // 启用了自动备份：先清理旧任务，再创建新任务
                     if (!DeleteScheduledTask("DataBackupTool_AutoBackup"))
                     {
                         Log("删除旧计划任务失败（可能不存在），继续创建新任务");
                     }
                     CreateScheduledTask("DataBackupTool_AutoBackup", backupTime);
+                }
+                else
+                {
+                    // 未启用自动备份：静默删除可能残留的旧任务
+                    DeleteScheduledTask("DataBackupTool_AutoBackup");
                 }
             }
             catch (Exception ex)
@@ -2228,83 +2279,62 @@ public class DataBackupTool : Form
         {
             try
             {
-                string configPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "config.txt");
-                if (File.Exists(configPath))
+                string jsonPath = Path.Combine(configRoot, "config.json");
+                if (File.Exists(jsonPath))
                 {
-                    // 使用UTF-8编码读取配置文件，与保存时一致
-                    string[] lines = File.ReadAllLines(configPath, Encoding.UTF8);
-                    foreach (string line in lines)
+                    string jsonContent = File.ReadAllText(jsonPath);
+                    Newtonsoft.Json.Linq.JObject config = Newtonsoft.Json.Linq.JObject.Parse(jsonContent);
+                    Newtonsoft.Json.Linq.JObject ui = config["ui"] as Newtonsoft.Json.Linq.JObject;
+                    if (ui != null)
                     {
-                        if (line.StartsWith("BackupRoot="))
+                        textBox3.Text = (ui["backupRoot"] ?? "").ToString();
+                        
+                        string timeStr = (ui["backupTime"] ?? "").ToString();
+                        DateTime backupTime;
+                        if (DateTime.TryParse(timeStr, out backupTime))
                         {
-                            textBox3.Text = line.Substring("BackupRoot=".Length);
+                            dateTimePicker1.Value = backupTime;
                         }
-                        else if (line.StartsWith("BackupTime="))
+                        
+                        string content = (ui["backupContent"] ?? "").ToString();
+                        radioButton1.Checked = (content == "仅图片");
+                        radioButton2.Checked = (content == "仅数据");
+                        radioButton3.Checked = (content == "图片+数据");
+                        
+                        string option = (ui["deleteAfterBackup"] ?? "").ToString();
+                        radioButton5.Checked = (option == "删除数据");
+                        radioButton6.Checked = (option == "暂不删除");
+                        
+                        bool autoBackupEnabled = (bool)(ui["autoBackup"] ?? false);
+                        checkBox1.Checked = autoBackupEnabled;
+                        checkBox1.Text = autoBackupEnabled ? "已启用" : "未启用";
+                        checkBox1.ForeColor = autoBackupEnabled ? Color.Green : Color.Red;
+                        
+                        textBox4.Text = (ui["importPath"] ?? "").ToString();
+                        
+                        string dupOpt = (ui["duplicateOption"] ?? "").ToString();
+                        if (dupOpt == "覆盖重复")
                         {
-                            string timeStr = line.Substring("BackupTime=".Length);
-                            DateTime backupTime;
-                            if (DateTime.TryParse(timeStr, out backupTime))
-                            {
-                                dateTimePicker1.Value = backupTime;
-                            }
+                            radioButton12.Checked = true;
+                            radioButton11.Checked = false;
+                            radioButton13.Checked = false;
                         }
-                        else if (line.StartsWith("BackupContent="))
+                        else if (dupOpt == "清空后导入")
                         {
-                            string content = line.Substring("BackupContent=".Length);
-                            radioButton1.Checked = (content == "仅图片");
-                            radioButton2.Checked = (content == "仅数据");
-                            radioButton3.Checked = (content == "图片+数据");
+                            radioButton13.Checked = true;
+                            radioButton11.Checked = false;
+                            radioButton12.Checked = false;
                         }
-                        else if (line.StartsWith("DeleteAfterBackup="))
+                        else
                         {
-                            string option = line.Substring("DeleteAfterBackup=".Length);
-                            radioButton5.Checked = (option == "删除数据");
-                            radioButton6.Checked = (option == "暂不删除");
+                            radioButton11.Checked = true;
+                            radioButton12.Checked = false;
+                            radioButton13.Checked = false;
                         }
-                        else if (line.StartsWith("AutoBackup="))
-                        {
-                            bool autoBackupEnabled;
-                            if (bool.TryParse(line.Substring("AutoBackup=".Length), out autoBackupEnabled))
-                            {
-                                checkBox1.Checked = autoBackupEnabled;
-                                checkBox1.Text = autoBackupEnabled ? "已启用" : "未启用";
-                                checkBox1.ForeColor = autoBackupEnabled ? Color.Green : Color.Red;
-                            }
-                        }
-                        else if (line.StartsWith("ImportPath="))
-                        {
-                            textBox4.Text = line.Substring("ImportPath=".Length);
-                        }
-                        else if (line.StartsWith("DuplicateOption="))
-                        {
-                            string option = line.Substring("DuplicateOption=".Length);
-                            // 如果配置值有效则使用配置，否则默认选中"追加导入"
-                            if (option == "覆盖重复")
-                            {
-                                radioButton12.Checked = true;
-                                radioButton11.Checked = false;
-                                radioButton13.Checked = false;
-                            }
-                            else if (option == "清空后导入")
-                            {
-                                radioButton13.Checked = true;
-                                radioButton11.Checked = false;
-                                radioButton12.Checked = false;
-                            }
-                            else
-                            {
-                                // 默认选中"追加导入"（包括空值或无效值的情况）
-                                radioButton11.Checked = true;
-                                radioButton12.Checked = false;
-                                radioButton13.Checked = false;
-                            }
-                        }
-                        else if (line.StartsWith("AfterImport="))
-                        {
-                            string option = line.Substring("AfterImport=".Length);
-                            radioButton14.Checked = (option == "保留备份文件");
-                            radioButton15.Checked = (option == "删除备份文件");
-                        }
+                        
+                        string afterImp = (ui["afterImport"] ?? "").ToString();
+                        radioButton14.Checked = (afterImp == "保留备份文件");
+                        radioButton15.Checked = (afterImp == "删除备份文件");
                     }
                 }
                 
@@ -2330,97 +2360,39 @@ public class DataBackupTool : Form
     {
         try
         {
-            string configPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "config.json");
+            string configPath = Path.Combine(configRoot, "config.json");
             if (File.Exists(configPath))
             {
                 string jsonContent = File.ReadAllText(configPath);
+                Newtonsoft.Json.Linq.JObject config = Newtonsoft.Json.Linq.JObject.Parse(jsonContent);
                 
                 // 加载备份数据库配置
-                LoadDatabaseSection(jsonContent, "backupMysql", 
-                    textBoxBackupDbHost, textBoxBackupDbPort, textBoxBackupDbUser, 
-                    textBoxBackupDbPassword, textBoxBackupDbName);
+                Newtonsoft.Json.Linq.JObject backupMysql = config["backupMysql"] as Newtonsoft.Json.Linq.JObject;
+                if (backupMysql != null)
+                {
+                    textBoxBackupDbHost.Text = (backupMysql["host"] ?? "").ToString();
+                    textBoxBackupDbPort.Text = (backupMysql["port"] ?? "").ToString();
+                    textBoxBackupDbUser.Text = (backupMysql["user"] ?? "").ToString();
+                    textBoxBackupDbPassword.Text = (backupMysql["password"] ?? "").ToString();
+                    textBoxBackupDbName.Text = (backupMysql["database"] ?? "").ToString();
+                }
                 
                 // 加载导入数据库配置
-                LoadDatabaseSection(jsonContent, "importMysql", 
-                    textBoxImportDbHost, textBoxImportDbPort, textBoxImportDbUser, 
-                    textBoxImportDbPassword, textBoxImportDbName);
+                Newtonsoft.Json.Linq.JObject importMysql = config["importMysql"] as Newtonsoft.Json.Linq.JObject;
+                if (importMysql != null)
+                {
+                    textBoxImportDbHost.Text = (importMysql["host"] ?? "").ToString();
+                    textBoxImportDbPort.Text = (importMysql["port"] ?? "").ToString();
+                    textBoxImportDbUser.Text = (importMysql["user"] ?? "").ToString();
+                    textBoxImportDbPassword.Text = (importMysql["password"] ?? "").ToString();
+                    textBoxImportDbName.Text = (importMysql["database"] ?? "").ToString();
+                }
             }
         }
         catch (Exception ex)
         {
             Log("加载数据库配置失败：" + ex.Message);
         }
-    }
-    
-    // 加载数据库配置节
-    private void LoadDatabaseSection(string jsonContent, string sectionName, 
-        TextBox hostBox, TextBox portBox, TextBox userBox, TextBox passwordBox, TextBox nameBox)
-    {
-        try
-        {
-            // 查找配置节
-            int dbSectionStart = jsonContent.IndexOf(string.Format("\"{0}\":", sectionName));
-            if (dbSectionStart != -1)
-            {
-                int dbSectionEnd = jsonContent.IndexOf("}", dbSectionStart);
-                if (dbSectionEnd != -1)
-                {
-                    string dbSection = jsonContent.Substring(dbSectionStart, dbSectionEnd - dbSectionStart);
-                    
-                    // 提取各个字段
-                    if (dbSection.Contains("\"host\":"))
-                    {
-                        hostBox.Text = ExtractJsonValue(dbSection, "host");
-                    }
-                    if (dbSection.Contains("\"port\":"))
-                    {
-                        portBox.Text = ExtractJsonValue(dbSection, "port");
-                    }
-                    if (dbSection.Contains("\"user\":"))
-                    {
-                        userBox.Text = ExtractJsonValue(dbSection, "user");
-                    }
-                    if (dbSection.Contains("\"password\":"))
-                    {
-                        passwordBox.Text = ExtractJsonValue(dbSection, "password");
-                    }
-                    if (dbSection.Contains("\"database\":"))
-                    {
-                        nameBox.Text = ExtractJsonValue(dbSection, "database");
-                    }
-                }
-            }
-        }
-        catch { }
-    }
-    
-    // 从 JSON 字符串中提取指定字段的值
-    private string ExtractJsonValue(string json, string fieldName)
-    {
-        try
-        {
-            int fieldStart = json.IndexOf(string.Format("\"{0}\":", fieldName));
-            if (fieldStart != -1)
-            {
-                int valueStart = json.IndexOf(":", fieldStart) + 1;
-                while (valueStart < json.Length && (json[valueStart] == ' ' || json[valueStart] == '"'))
-                {
-                    if (json[valueStart] == '"')
-                    {
-                        valueStart++;
-                        break;
-                    }
-                    valueStart++;
-                }
-                int valueEnd = json.IndexOf("\"", valueStart);
-                if (valueEnd != -1)
-                {
-                    return json.Substring(valueStart, valueEnd - valueStart);
-                }
-            }
-        }
-        catch { }
-        return "";
     }
     
     //创建Windows计划任务的方法，用于设置自动备份的定时执行
@@ -2469,8 +2441,6 @@ public class DataBackupTool : Form
                 return false;
             }
         }
-        
-        //删除Windows计划任务的方法，用于取消自动备份的定时执行
         private bool DeleteScheduledTask(string taskName)
         {
             try
@@ -2487,21 +2457,11 @@ public class DataBackupTool : Form
                     process.Start();
                     process.WaitForExit();
                     
-                    if (process.ExitCode == 0)
-                    {
-                        Log("Scheduled task deleted successfully");
-                        return true;
-                    }
-                    else
-                    {
-                        Log("Failed to delete scheduled task");
-                        return false;
-                    }
+                    return process.ExitCode == 0;
                 }
             }
-            catch (Exception ex)
+            catch
             {
-                Log("Error deleting scheduled task: " + ex.Message);
                 return false;
             }
         }
@@ -2511,8 +2471,8 @@ public class DataBackupTool : Form
         private void ResetUI()
         {
             isWorking = false;
-            button1.Enabled = IsValidGuid(textBox1.Text.Trim());
-            button9.Enabled = !string.IsNullOrEmpty(textBox4.Text) && Directory.Exists(textBox4.Text);
+            button1.Enabled = true;
+            button9.Enabled = true;
             textBox1.Enabled = true;
             textBox4.Enabled = true;
             comboBox1.Enabled = true;
@@ -2573,6 +2533,7 @@ public class DataBackupTool : Form
         
         if (!string.IsNullOrEmpty(repoRoot))
         {
+            DataBackupTool.configRoot = repoRoot;
             Directory.SetCurrentDirectory(repoRoot);
         }
         
@@ -2587,46 +2548,38 @@ public class DataBackupTool : Form
         Application.Run(new DataBackupTool());
     }
     
-    // 从 config.json 读取配置值
+    // 从 config.json 读取配置值（使用 JObject 解析）
     private string GetConfigValue(string key, string defaultValue)
     {
         try
         {
-            string configPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "config.json");
+            string configPath = Path.Combine(configRoot, "config.json");
             if (File.Exists(configPath))
             {
                 string jsonContent = File.ReadAllText(configPath);
-                // 简单的 JSON 解析
+                Newtonsoft.Json.Linq.JObject config = Newtonsoft.Json.Linq.JObject.Parse(jsonContent);
+                
                 string[] keyParts = key.Split('.');
-                if (keyParts.Length == 2)
+                Newtonsoft.Json.Linq.JToken current = config;
+                
+                foreach (string part in keyParts)
                 {
-                    string section = keyParts[0];
-                    string field = keyParts[1];
-                    
-                    // 查找 section
-                    int sectionStart = jsonContent.IndexOf(string.Format("\"{0}\":", section));
-                    if (sectionStart != -1)
+                    Newtonsoft.Json.Linq.JObject obj = current as Newtonsoft.Json.Linq.JObject;
+                    if (obj != null && obj[part] != null)
                     {
-                        int sectionEnd = jsonContent.IndexOf("}", sectionStart);
-                        if (sectionEnd != -1)
-                        {
-                            string sectionContent = jsonContent.Substring(sectionStart, sectionEnd - sectionStart);
-                            int fieldStart = sectionContent.IndexOf(string.Format("\"{0}\":", field));
-                            if (fieldStart != -1)
-                            {
-                                int valueStart = sectionContent.IndexOf(":", fieldStart) + 1;
-                                int valueEnd = sectionContent.IndexOf(",", valueStart);
-                                if (valueEnd == -1) valueEnd = sectionContent.IndexOf("}", valueStart);
-                                
-                                string value = sectionContent.Substring(valueStart, valueEnd - valueStart).Trim();
-                                // 去除引号
-                                if (value.StartsWith("\"")) value = value.Substring(1);
-                                if (value.EndsWith("\"")) value = value.Substring(0, value.Length - 1);
-                                return value;
-                            }
-                        }
+                        current = obj[part];
+                    }
+                    else
+                    {
+                        return defaultValue;
                     }
                 }
+                
+                if (current != null && current.Type == Newtonsoft.Json.Linq.JTokenType.String)
+                {
+                    return current.ToString();
+                }
+                return defaultValue;
             }
         }
         catch { }
@@ -2702,7 +2655,15 @@ public class DataBackupTool : Form
             
             logCallback("互斥锁已获取，开始自动备份");
             
-            // 重置取消信号，清除上次取消遗留的状态
+            // 确保取消信号被重置（清除上次残留的状态）
+            try
+            {
+                using (var evt = System.Threading.EventWaitHandle.OpenExisting(CancelEventName))
+                {
+                    evt.Reset();
+                }
+            }
+            catch { }
             if (cancelEventHandle != null)
             {
                 try { cancelEventHandle.Reset(); } catch { }
@@ -2736,15 +2697,14 @@ public class DataBackupTool : Form
                 autoProcess.StartInfo.CreateNoWindow = true;
                 autoProcess.StartInfo.WorkingDirectory = exeDir;
                 
+                // 异步读取输出，避免管道缓冲区满导致死锁
                 autoProcess.OutputDataReceived += (sender, e) =>
                 {
                     if (!string.IsNullOrEmpty(e.Data))
                     {
-                        // PowerShell脚本已经写入自己的日志文件(auto_backup_log.txt)
-                        // 这里只通过回调显示到UI，不再写入文件避免重复
+                        // PowerShell脚本已写入自己的日志文件(auto_backup_log.txt)
                         if (e.Data.StartsWith("["))
                         {
-                            // 已经有时间戳，直接写入文件
                             WriteLogToFile(e.Data);
                         }
                         else
@@ -2753,12 +2713,10 @@ public class DataBackupTool : Form
                         }
                     }
                 };
-                
                 autoProcess.ErrorDataReceived += (sender, e) =>
                 {
                     if (!string.IsNullOrEmpty(e.Data))
                     {
-                        // 错误信息统一通过回调处理
                         logCallback("Error: " + e.Data);
                     }
                 };
@@ -2771,7 +2729,7 @@ public class DataBackupTool : Form
                 }
                 autoProcess.BeginOutputReadLine();
                 autoProcess.BeginErrorReadLine();
-                // 周期性检查取消信号，而非无限等待
+                // 周期性检查取消信号，同时异步读取在后台消费管道数据
                 while (!autoProcess.HasExited)
                 {
                     if (cancelEventHandle != null && cancelEventHandle.WaitOne(0))
@@ -2872,7 +2830,6 @@ public class DataBackupTool : Form
             {
                 statusLabel.ForeColor = Color.Red;
                 statusLabel.Text = "请填写完整的数据库信息";
-                MessageBox.Show("请填写完整的数据库信息！", "提示", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
             
@@ -2888,42 +2845,13 @@ public class DataBackupTool : Form
                 if (File.Exists(p)) { mysqlExeVal = p; break; }
             }
 
-            // Win32 命令行参数转义：将含空格/引号的参数正确包装（兼容 .NET Framework 4.8）
-            System.Func<string, string> escapeArg = delegate(string arg)
-            {
-                if (string.IsNullOrEmpty(arg)) return "\"\"";
-                bool needQuote = arg.IndexOfAny(new char[] { ' ', '\t', '\n', '"' }) >= 0;
-                System.Text.StringBuilder sb = new System.Text.StringBuilder(arg.Length + 8);
-                if (needQuote) sb.Append('"');
-                int backslashes = 0;
-                foreach (char c in arg)
-                {
-                    if (c == '\\') { backslashes++; }
-                    else if (c == '"')
-                    {
-                        sb.Append('\\', backslashes * 2 + 1);
-                        sb.Append('"');
-                        backslashes = 0;
-                    }
-                    else
-                    {
-                        sb.Append('\\', backslashes);
-                        sb.Append(c);
-                        backslashes = 0;
-                    }
-                }
-                sb.Append('\\', backslashes * 2);
-                if (needQuote) sb.Append('"');
-                return sb.ToString();
-            };
-
-            // 将每个参数用空格连接，mysql.exe 直接解析，不经过外壳
             string[] mysqlArgs = new string[] {
                 "--host=" + host,
                 "--port=" + port,
                 "--user=" + user,
                 "--password=" + password,
                 "--default-character-set=utf8mb4",
+                "--connect-timeout=10",
                 "-e",
                 "SELECT 1",
                 dbName
@@ -2933,7 +2861,16 @@ public class DataBackupTool : Form
             {
                 System.Diagnostics.ProcessStartInfo psi = process.StartInfo;
                 psi.FileName = mysqlExeVal;
-                psi.Arguments = string.Join(" ", System.Array.ConvertAll(mysqlArgs, a => escapeArg(a)));
+                // 手动拼参数（.NET 4.8 不支持 ArgumentList）
+                System.Text.StringBuilder sb = new System.Text.StringBuilder();
+                foreach (string a in mysqlArgs)
+                {
+                    if (sb.Length > 0) sb.Append(' ');
+                    sb.Append('"');
+                    sb.Append(a.Replace("\"", "\\\""));
+                    sb.Append('"');
+                }
+                psi.Arguments = sb.ToString();
                 psi.UseShellExecute = false;
                 psi.RedirectStandardOutput = true;
                 psi.RedirectStandardError = true;
@@ -2942,30 +2879,34 @@ public class DataBackupTool : Form
                 psi.StandardErrorEncoding = System.Text.Encoding.UTF8;
 
                 process.Start();
-                string output = process.StandardOutput.ReadToEnd();
+                // 先读 stderr（小数据量），再读 stdout，防止管道死锁
                 string error = process.StandardError.ReadToEnd();
-                process.WaitForExit();
-
-                if (process.ExitCode == 0)
+                if (process.WaitForExit(15000))
                 {
-                    statusLabel.ForeColor = Color.Green;
-                    statusLabel.Text = "连接成功";
-                    MessageBox.Show("✓ 连接成功！数据库可正常访问", "连接状态", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    string output = process.StandardOutput.ReadToEnd();
+                    if (process.ExitCode == 0)
+                    {
+                        statusLabel.ForeColor = Color.Green;
+                        statusLabel.Text = "✓ 连接成功！数据库可正常访问";
+                    }
+                    else
+                    {
+                        statusLabel.ForeColor = Color.Red;
+                        statusLabel.Text = "✗ 连接失败：" + (string.IsNullOrEmpty(error) ? "退出码 " + process.ExitCode : error.Trim());
+                    }
                 }
                 else
                 {
+                    try { process.Kill(); } catch { }
                     statusLabel.ForeColor = Color.Red;
-                    statusLabel.Text = "连接失败";
-                    string errorMsg = string.IsNullOrEmpty(error) ? "无法连接到数据库" : error.Trim();
-                    MessageBox.Show("✗ 连接失败：\n" + errorMsg, "连接状态", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    statusLabel.Text = "✗ 连接超时（15秒）";
                 }
             }
         }
         catch (Exception ex)
         {
             statusLabel.ForeColor = Color.Red;
-            statusLabel.Text = "发生错误";
-            MessageBox.Show("✗ 发生错误：\n" + ex.Message, "异常", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            statusLabel.Text = "✗ 发生错误：" + ex.Message;
         }
     }
     
@@ -3012,7 +2953,7 @@ public class DataBackupTool : Form
             }
             
             // 保存到 config.json
-            string configPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "config.json");
+            string configPath = Path.Combine(configRoot, "config.json");
             if (!File.Exists(configPath))
             {
                 MessageBox.Show("配置文件不存在", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);

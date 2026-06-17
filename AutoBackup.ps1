@@ -6,25 +6,7 @@ $PSDefaultParameterValues['*:Encoding'] = 'UTF8'
 # 设置 PowerShell 使用 UTF-8 作为默认编码
 $OutputEncoding = [System.Text.Encoding]::UTF8
 
-# 查找 MySQL 可执行文件路径
-function Find-MySqlBin {
-    $cmd = Get-Command "mysql.exe" -ErrorAction SilentlyContinue
-    if ($cmd) { return Split-Path $cmd.Source }
-    $services = Get-ChildItem "HKLM:\SYSTEM\CurrentControlSet\Services" -ErrorAction SilentlyContinue |
-        Where-Object { $_.PSChildName -match "^MySQL" }
-    foreach ($svc in $services) {
-        $imgPath = (Get-ItemProperty $svc.PSPath -ErrorAction SilentlyContinue).ImagePath
-        if ($imgPath) {
-            $binDir = Split-Path ($imgPath -replace '"', '').Trim()
-            if ($binDir -and (Test-Path (Join-Path $binDir "mysql.exe"))) { return $binDir }
-        }
-    }
-    $fixedPaths = @("E:\MySQL\MySQL Server 8.0\bin", "D:\MySQL\MySQL Server 8.0\bin")
-    foreach ($fixedPath in $fixedPaths) {
-        if (Test-Path (Join-Path $fixedPath "mysql.exe")) { return $fixedPath }
-    }
-    return $null
-}
+. "$PSScriptRoot\_common.ps1"
 
 $mysqlBinDir = Find-MySqlBin
 if ($mysqlBinDir) {
@@ -212,9 +194,11 @@ function Backup-Batch {
             $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
             $psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8
             $process = [System.Diagnostics.Process]::Start($psi)
+            # ponytail: 异步读 stderr + 同步读 stdout，防管道死锁
+            $stderrTask = $process.StandardError.ReadToEndAsync()
             $output = $process.StandardOutput.ReadToEnd()
-            $errorOutput = $process.StandardError.ReadToEnd()
-            $process.WaitForExit()
+            if (-not $process.WaitForExit(300000)) { $process.Kill(); $process.WaitForExit(5000); $success = $false }
+            $errorOutput = $stderrTask.GetAwaiter().GetResult()
             if ($output) { Write-Log $output }
             if ($errorOutput -and !$errorOutput.Contains("Using a password on the command line interface can be insecure")) { Write-Log "错误: $errorOutput" }
             if ($process.ExitCode -ne 0) { Write-Log "imagecopy.ps1 failed with exit code: $($process.ExitCode)"; $success = $false }
@@ -237,9 +221,10 @@ function Backup-Batch {
             $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
             $psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8
             $process = [System.Diagnostics.Process]::Start($psi)
+            $stderrTask = $process.StandardError.ReadToEndAsync()
             $output = $process.StandardOutput.ReadToEnd()
-            $errorOutput = $process.StandardError.ReadToEnd()
-            $process.WaitForExit()
+            if (-not $process.WaitForExit(300000)) { $process.Kill(); $process.WaitForExit(5000); $success = $false }
+            $errorOutput = $stderrTask.GetAwaiter().GetResult()
             if ($output) { Write-Log $output }
             if ($errorOutput -and !$errorOutput.Contains("Using a password on the command line interface can be insecure")) { Write-Log "错误: $errorOutput" }
             if ($process.ExitCode -ne 0) { Write-Log "GUID-Data.ps1 failed with exit code: $($process.ExitCode)"; $success = $false }
@@ -257,9 +242,10 @@ function Backup-Batch {
             $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
             $psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8
             $process = [System.Diagnostics.Process]::Start($psi)
+            $stderrTask = $process.StandardError.ReadToEndAsync()
             $output = $process.StandardOutput.ReadToEnd()
-            $errorOutput = $process.StandardError.ReadToEnd()
-            $process.WaitForExit()
+            if (-not $process.WaitForExit(300000)) { $process.Kill(); $process.WaitForExit(5000); $success = $false }
+            $errorOutput = $stderrTask.GetAwaiter().GetResult()
             if ($output) { Write-Log $output }
             if ($errorOutput -and !$errorOutput.Contains("Using a password on the command line interface can be insecure")) { Write-Log "错误: $errorOutput" }
             if ($process.ExitCode -ne 0) { Write-Log "schema.ps1 failed with exit code: $($process.ExitCode)"; $success = $false }
@@ -301,7 +287,6 @@ if ($mutex -ne $null -and -not $mutex.WaitOne(0)) {
 
 try {
     $configPath = Join-Path $repoRoot "config.json"
-    $configTxtPath = Join-Path $repoRoot "config.txt"
     Write-Log "Checking configuration files..."
     if (-not (Test-Path $configPath)) {
         $errorMessage = "Config file not found: $configPath"
@@ -346,42 +331,31 @@ try {
     }
 
     $backupRoot = $repoRoot
-    if (Test-Path $configTxtPath) {
-        Write-Log "Reading backup root path from config.txt"
-        $configLines = Get-Content -Path $configTxtPath -Encoding UTF8
-        foreach ($line in $configLines) {
-            if ($line -match "^BackupRoot=(.+)$") {
-                $backupRoot = $matches[1].Trim()
-                Write-Log "Backup root path configured as: $backupRoot"
-                break
-            }
+    if ($config.ui -and $config.ui.backupRoot) {
+        $backupRoot = $config.ui.backupRoot.Trim()
+        if (-not [string]::IsNullOrEmpty($backupRoot)) {
+            Write-Log "Backup root path configured as: $backupRoot"
+        } else {
+            $backupRoot = $repoRoot
         }
     } else {
-        Write-WarningLog "config.txt not found, using default backup root: $repoRoot"
+        Write-WarningLog "config.json ui.backupRoot not found, using default backup root: $repoRoot"
     }
 
     $backupContent = "ImagesAndData"
-    if (Test-Path $configTxtPath) {
-        Write-Log "Reading backup content setting from config.txt"
-        $configLines = Get-Content -Path $configTxtPath -Encoding UTF8
-        foreach ($line in $configLines) {
-            if ($line -match "^BackupContent=(.+)$") {
-                $backupContent = $matches[1]
-                Write-Log "Backup content configured as: $backupContent"
-                $backupContent = $backupContent.Trim()
-                if ($backupContent -eq "仅图片" -or $backupContent -eq "OnlyImages") {
-                    $backupContent = "OnlyImages"
-                } elseif ($backupContent -eq "仅数据" -or $backupContent -eq "OnlyData") {
-                    $backupContent = "OnlyData"
-                } else {
-                    $backupContent = "ImagesAndData"
-                }
-                Write-Log "Converted backup content to: $backupContent"
-                break
-            }
+    if ($config.ui -and $config.ui.backupContent) {
+        $rawContent = $config.ui.backupContent.Trim()
+        Write-Log "Backup content configured as: $rawContent"
+        if ($rawContent -eq "仅图片" -or $rawContent -eq "OnlyImages") {
+            $backupContent = "OnlyImages"
+        } elseif ($rawContent -eq "仅数据" -or $rawContent -eq "OnlyData") {
+            $backupContent = "OnlyData"
+        } else {
+            $backupContent = "ImagesAndData"
         }
+        Write-Log "Converted backup content to: $backupContent"
     } else {
-        Write-WarningLog "config.txt not found, using default backup content: $backupContent"
+        Write-WarningLog "config.json ui.backupContent not found, using default: $backupContent"
     }
 
     Write-Log "Getting all GUIDs from database..."
