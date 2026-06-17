@@ -73,25 +73,31 @@ function Delete-TableData {
 Write-Log "`n[Step 1] Deleting data..."
 $totalDeleted = 0
 
-$deleted = Delete-TableData -tableName "rep_lot" -whereClause "GUID = '$cleanGuid'" -description "by GUID"
+function Get-LastValue {
+    param($value)
+    if ($value -is [array]) { return $value[-1] }
+    return $value
+}
+
+$deleted = Get-LastValue (Delete-TableData -tableName "rep_lot" -whereClause "GUID = '$cleanGuid'" -description "by GUID")
 $totalDeleted += $deleted
-$deleted = Delete-TableData -tableName "rep_frame" -whereClause "GUID = '$cleanGuid'" -description "by GUID"
+$deleted = Get-LastValue (Delete-TableData -tableName "rep_frame" -whereClause "GUID = '$cleanGuid'" -description "by GUID")
 $totalDeleted += $deleted
-$deleted = Delete-TableData -tableName "rep_unit" -whereClause "GUID = '$cleanGuid'" -description "by GUID"
+$deleted = Get-LastValue (Delete-TableData -tableName "rep_unit" -whereClause "GUID = '$cleanGuid'" -description "by GUID")
 $totalDeleted += $deleted
-$deleted = Delete-TableData -tableName "rep_result" -whereClause "GUID = '$cleanGuid'" -description "by GUID"
+$deleted = Get-LastValue (Delete-TableData -tableName "rep_result" -whereClause "GUID = '$cleanGuid'" -description "by GUID")
 $totalDeleted += $deleted
 
 Write-Log "`n[Step 2] Query detectionsSHA256..."
 $detectionsSHA256 = Get-DetectionsSHA256 -guid $cleanGuid
 if (-not [string]::IsNullOrEmpty($detectionsSHA256)) {
     Write-Log "detectionsSHA256: $detectionsSHA256"
-    $deleted = Delete-TableData -tableName "rep_detections" -whereClause "recipeSHA256 = '$detectionsSHA256'" -description "by recipeSHA256"
+    $deleted = Get-LastValue (Delete-TableData -tableName "rep_detections" -whereClause "recipeSHA256 = '$detectionsSHA256'" -description "by recipeSHA256")
     $totalDeleted += $deleted
 } else { Write-Log "Warning: detectionsSHA256 is empty, skipping rep_detections" }
 
 # sys_defect 表删除全部（无 WHERE 条件）
-$deleted = Delete-TableData -tableName "sys_defect" -whereClause "1=1" -description "all"
+$deleted = Get-LastValue (Delete-TableData -tableName "sys_defect" -whereClause "1=1" -description "all")
 $totalDeleted += $deleted
 
 Write-Log "`n[Step 3] Delete complete!"

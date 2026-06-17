@@ -6,9 +6,10 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
 
 function Write-Log {
     param([string]$message)
-    # ponytail: 不用 [Console]::WriteLine —— CreateNoWindow + 重定向 stdout 时，
+    # ponytail: 不用 [Console]::WriteLine —— CreateNoWindow + 重定向 stdout 时
     # .NET Framework 访问控制台句柄可能挂起数分钟。
     # 用 Write-Output 写入 stdout 流，C# 端通过 BeginOutputReadLine 捕获。
+    # 注意：在函数内部调用 Write-Log 会混入管道返回值，调用方需取 $result[-1]。
     Write-Output $message
 }
 

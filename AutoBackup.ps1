@@ -210,9 +210,10 @@ function Backup-Batch {
         if (-not (Test-Path $schemaScript)) { Write-Log "Script not found: $schemaScript"; return $false }
         try {
             Write-Log "Running GUID-Data.ps1..."
+            $dataPath = Join-Path $backupRoot "data"
             $psi = New-Object System.Diagnostics.ProcessStartInfo
             $psi.FileName = "powershell.exe"
-            $psi.Arguments = "-ExecutionPolicy Bypass -File `"$guidDataScript`" -guid `"$guid`" -backupRoot `"$backupRoot`""
+            $psi.Arguments = "-ExecutionPolicy Bypass -File `"$guidDataScript`" -guid `"$guid`" -path `"$dataPath`""
             $psi.WorkingDirectory = $repoRoot
             $psi.RedirectStandardOutput = $true
             $psi.RedirectStandardError = $true

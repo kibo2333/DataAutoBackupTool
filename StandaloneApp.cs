@@ -110,6 +110,7 @@ public class DataBackupTool : Form
     private FileSystemWatcher logWatcher;
     private string logFilePath;
     private long lastFileSize = 0;
+    private DateTime lastLogEvent = DateTime.MinValue;
     
     private static string staticLogFilePath;
 
@@ -967,6 +968,14 @@ public class DataBackupTool : Form
     {
         try
         {
+            // ponytail: 防抖 —— FileSystemWatcher 可能对一次写入触发多次 Changed
+            DateTime now = DateTime.UtcNow;
+            if ((now - lastLogEvent).TotalMilliseconds < 50)
+            {
+                return;
+            }
+            lastLogEvent = now;
+            
             FileInfo fileInfo = new FileInfo(logFilePath);
             long currentSize = fileInfo.Length;
             
@@ -1361,20 +1370,6 @@ public class DataBackupTool : Form
                 childProcessPids.Clear();
             }
             
-            // ===== 终止 PowerShell 间接启动的 robocopy 子进程 =====
-            foreach (var process in System.Diagnostics.Process.GetProcessesByName("robocopy"))
-            {
-                try
-                {
-                    process.Kill();
-                    Log(String.Format("终止 Robocopy 进程: {0}", process.Id));
-                }
-                catch (Exception ex)
-                {
-                    Log(String.Format("终止进程 {0} 失败: {1}", process.Id, ex.Message));
-                }
-            }
-            
             // ===== 终止 PowerShell 间接启动的 mysqldump 子进程 =====
             foreach (var process in System.Diagnostics.Process.GetProcessesByName("mysqldump"))
             {
@@ -1401,6 +1396,51 @@ public class DataBackupTool : Form
                 {
                     Log(String.Format("终止进程 {0} 失败: {1}", process.Id, ex.Message));
                 }
+            }
+            
+            // ===== 终止定时任务启动的后台 AutoBackup PowerShell 进程 =====
+            try
+            {
+                // 通过 WMI 查找命令行包含本软件脚本名的所有 powershell 进程
+                // 包括 AutoBackup.ps1、imagecopy.ps1、GUID-Data.ps1、schema.ps1 等子进程
+                string wmiQuery = "SELECT ProcessId FROM Win32_Process WHERE Name='powershell.exe' AND (CommandLine LIKE '%.ps1%') AND (CommandLine LIKE '%repos%')";
+                foreach (System.Management.ManagementObject obj in new System.Management.ManagementObjectSearcher(wmiQuery).Get())
+                {
+                    try
+                    {
+                        int pid = Convert.ToInt32(obj["ProcessId"]);
+                        System.Diagnostics.Process proc = System.Diagnostics.Process.GetProcessById(pid);
+                        proc.Kill();
+                        proc.WaitForExit(3000);
+                        Log(String.Format("终止后台 PowerShell 进程: {0}", pid));
+                    }
+                    catch (Exception ex)
+                    {
+                        System.Diagnostics.Debug.WriteLine("Kill PS failed: {0}", ex.Message);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine("WMI query failed: {0}", ex.Message);
+            }
+            
+            // ===== 二次清理：循环杀 robocopy 直到没有新的冒出来 =====
+            for (int retry = 0; retry < 5; retry++)
+            {
+                bool found = false;
+                foreach (var process in System.Diagnostics.Process.GetProcessesByName("robocopy"))
+                {
+                    found = true;
+                    try
+                    {
+                        process.Kill();
+                        Log(String.Format("终止 Robocopy 进程({0}): {1}", retry + 1, process.Id));
+                    }
+                    catch { }
+                }
+                if (!found) break;
+                System.Threading.Thread.Sleep(1000);
             }
             
             Log("所有备份相关进程已终止");
@@ -1506,14 +1546,7 @@ public class DataBackupTool : Form
     // 撤销备份按钮点击事件
     private void ButtonCancelBackup_Click(object sender, EventArgs e)
     {
-        if (isWorking)
-        {
-            CancelAllBackups(true);
-        }
-        else
-        {
-            Log("当前没有正在执行的备份操作");
-        }
+        CancelAllBackups(true);
     }
     
     private void Button7_Click(object sender, EventArgs e)
